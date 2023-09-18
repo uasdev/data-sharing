@@ -1,1 +1,211 @@
 https://headwallphotonics.sharefile.com/d-s3f46b341ba8344168cb2bfa2c551a2e8
+
+
+## CODE
+"""
+After metadata is output and saved to CSV file, add HUD to live video stream
+"""
+import glob
+import os
+import pandas as pd
+import cv2
+import numpy as np
+from datetime import datetime
+import math
+from pyproj import Proj
+import mgrs
+from scipy import ndimage
+
+
+def _get_meta(fp):
+    # Get metadata for HUD
+    meta_df = pd.read_csv(fp)
+    return meta_df
+
+
+def _read_vidstream(fp):
+    # read input video stream
+    vid = cv2.VideoCapture(fp)
+    return vid
+
+
+def _inset_map(vidframe, idx):
+    # Create inset map using video frame
+    # Read image using rasterio
+    return
+
+def lonToUtm(lon):
+    # Return UTM zone number for projection
+    return (math.floor((lon + 180)/6) % 60) + 1
+
+def rotate_pt(origin, point, angle):
+    """
+    Rotate a point counterclockwise by a given angle around a given origin.
+
+    The angle should be given in radians.
+    """
+    ox, oy = origin
+    px, py = point
+    angle = math.radians(angle)
+
+    qx = ox + math.cos(angle) * (px - ox) - math.sin(angle) * (py - oy)
+    qy = oy + math.sin(angle) * (px - ox) + math.cos(angle) * (py - oy)
+    return qx, qy
+
+
+def create_fmv_hud(vid, outf, meta):
+    # e.g. output file path
+    # output_video_path = "../data/output/hud/P0720438_HUD_V2.MP4"
+
+    # Read first frame to get output video information!
+    success, image = vid.read()
+
+    # Define the codec and frame size of the output video (use the same codec as the input video)
+    frame_rate = vid.get(cv2.CAP_PROP_FPS)  # Frame rate
+    # output_codec = cv2.VideoWriter_fourcc(int(vid.get(cv2.CAP_PROP_FOURCC)))
+    output_codec = cv2.VideoWriter_fourcc(*'mp4v')
+    frame_width = int(vid.get(cv2.CAP_PROP_FRAME_WIDTH))  # Frame width
+    frame_height = int(vid.get(cv2.CAP_PROP_FRAME_HEIGHT))  # Frame height
+    output_frame_size = (frame_width, frame_height)
+    # Create a VideoWriter object to write the frames with metadata to the new video file
+    output_video = cv2.VideoWriter(outf, output_codec, frame_rate, output_frame_size)
+    # Resize image and get shape
+    # width_resized = int(frame_width*1/4)
+    # height_resized = int(frame_height*1/4)
+    # resized_img = cv2.resize(img, (width_resized, height_resized))
+    # img_height, img_width, _ = resized_img.shape
+
+    # Get compass image
+    compass_img = cv2.imread("../data/north_arrow.png", cv2.IMREAD_UNCHANGED)
+    compass_height, compass_width, _ = compass_img.shape
+    # Resize image and get shape
+    # resize_height = int(compass_height*1/16)
+    # resize_width = int(compass_width * 1/16)
+    # compass_img_resized = cv2.resize(compass_img, (resize_height, resize_height))
+
+
+    # Start with position 1, since we already read position 0 for creating output video above
+    frame_idx = 1
+    while True:
+        ret, frame = vid.read()
+
+        # Check if the frame was successfully read
+        if not ret:
+            break
+
+        # Get metadata for the current frame (use positional indexing from opencv frame number
+        frame_meta = meta.iloc[[frame_idx]].copy()
+
+        # Add metadata text to the frame
+        # unixtime = frame_meta['UNIX Time Stamp'].values
+        unixtime = frame_meta['UNIX Time Stamp'].values[0]
+        yrmoday = datetime.utcfromtimestamp(unixtime/1e6).strftime("%Y-%m-%d")
+        hms_time = datetime.utcfromtimestamp(unixtime/1e6).strftime("%H:%M:%S")
+        lat = frame_meta['Sensor Latitude'].values[0]
+        lon = frame_meta['Sensor Longitude'].values[0]
+        # Platform attributes
+        angle_head = np.round(frame_meta['Platform Heading Angle'].values[0], 2)
+        angle_pitch = np.round(frame_meta['Platform Pitch Angle'].values[0], 2)
+        angle_roll = np.round(frame_meta['Platform Roll Angle'].values[0], 2)
+        # Sensor attributes
+        angle_elev_sens = np.round(frame_meta['Sensor Relative Elevation Angle_corrected'].values[0], 2)
+        velocity_north_sens = np.round(frame_meta['Sensor North Velocity'].values[0], 2)
+        velocity_east_sens = np.round(frame_meta['Sensor East Velocity'].values[0], 2)
+        altitude_sens = np.round(frame_meta['Sensor True Altitude'].values[0], 2)
+
+        fontscale = 1.75
+        # It is BGR for some reason. Not RGB
+        rgb_color = (191,191,191)
+        # Air Force Colors - Ultramarine Blue (242,55,4) / Gold (0,215,255)
+        # rgb_color = (242,55,4)
+        # Add position data to frame
+        # Convert lat lon to UTM easting and northing (MGRS is UTM coords, but they just built on top of it)
+        mgrs_object = mgrs.MGRS()
+        mgrs_grid = mgrs_object.toMGRS(lat, lon, MGRSPrecision=1)
+        utmzone_num = lonToUtm(lon)
+        proj = Proj(f"+proj=utm +zone={utmzone_num} +north +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+        utm_coords = proj(lon, lat)
+        pos_text = f" ({mgrs_grid[:-2]}) {int(utm_coords[1])}, {int(utm_coords[0])}"
+        xpos= int(frame_width * .01)
+        ypos= int(frame_height * .945)
+        cv2.putText(frame, pos_text, (xpos, ypos), cv2.FONT_HERSHEY_SIMPLEX, fontscale, rgb_color, 3)
+
+        # Add time to frame
+        time_text = f"{yrmoday} {hms_time}"
+        # print(time_text)
+        xpos= int(frame_width * .01)
+        ypos= int(frame_height * .985)
+        cv2.putText(frame, time_text, (xpos, ypos), cv2.FONT_HERSHEY_SIMPLEX, fontscale, rgb_color, 3)
+
+        # Add altitude of sensor
+        txt = f"ALT: {altitude_sens}"
+        xpos= int(frame_width * .9)
+        ypos= int(frame_height * .95)
+        cv2.putText(frame, txt, (xpos, ypos), cv2.FONT_HERSHEY_SIMPLEX, fontscale, rgb_color, 3)
+
+        # Add platform velocity and sensor orientation
+        txt = f"HDG: {angle_head}, ATT: {angle_pitch}, Roll: {angle_roll}"
+        xpos= int(frame_width * .72)
+        ypos= int(frame_height * .985)
+        cv2.putText(frame, txt, (xpos, ypos), cv2.FONT_HERSHEY_SIMPLEX, fontscale, rgb_color, 3)
+
+        # Process or do further manipulations on the frame here
+        # Create circle with North arrow and changing cardinal direction (a compass) (use basic trigonometry)
+        xpos_start = int(frame_width * .96)
+        ypos_start = int(frame_height * .9)
+        start_point = (xpos_start, ypos_start)
+        end_point = (xpos_start, int(frame_height * .86))
+        rotated_pt = rotate_pt(start_point, end_point, 360-angle_head)
+        rotated_pt = (int(rotated_pt[0]), int(rotated_pt[1]))
+        line_width = 4
+        cv2.arrowedLine(frame, start_point, rotated_pt, rgb_color, line_width)
+
+        # Instead, use svg compass, rotate, and add as image!
+        # compass_img_rotated = ndimage.rotate(compass_img, 360-angle_head)
+        # height_rot, width_rot, _ = compass_img_rotated.shape
+        # x = int(frame_width * .8)
+        # y = int(frame_height * .8)
+        # First add alpha channel to frame
+        ## frame = cv2.cvtColor(frame, cv2.COLOR_RGB2RGBA)
+        # frame[y:y+height_rot, x:x+width_rot] = compass_img_rotated
+
+        # Add inset image with FMV FOV polygon
+        # x = int(frame_width * .725)
+        # y = int(frame_height * .05)
+        # frame[y:y+img_height, x:x+img_width] = resized_img
+
+        # Write the frame with metadata to the new video file
+        output_video.write(frame)
+        frame_idx+=1
+
+    # Release the video objects
+    vid.release()
+    output_video.release()
+    cv2.destroyAllWindows()
+    return 0
+
+def main():
+    # Loop through directory
+    # indir = "../data/raw/BCP/raw" # for testing
+    # indir = "/Users/labmac/Documents/projects/roblar-road/data/raw/anafi/video"
+    # outdir = "/Users/labmac/Documents/projects/roblar-road/data/output/anafi/"
+    indir = "/Users/labmac/geospatial_data/Processing/MCB_CPEN/Tango_TA"
+    outdir = "/Users/labmac/geospatial_data/Processing/MCB_CPEN/Tango_TA/output"
+    if ~os.path.isdir(outdir):
+        os.mkdir(outdir)
+    filepaths = glob.glob(os.path.join(indir, "*.MP4"))
+
+    for fpath in filepaths:
+        print(fpath)
+        # get meta
+        basename = os.path.basename(fpath)[:-4]
+        print(basename)
+        meta_df = _get_meta(fpath.replace("MP4", "csv"))
+        # Read video stream
+        vid = _read_vidstream(fpath)
+        # output_vid_fp = f"../data/output/hud/BCP/{basename}_HUD_COMPASS.MP4"
+        output_vid_fp = os.path.join(outdir, f"{basename}_HUD_COMPASS.MP4")
+        create_fmv_hud(vid, output_vid_fp, meta_df)
+
+if __name__ == "__main__":
+    main()
